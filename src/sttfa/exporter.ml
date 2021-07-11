@@ -26,6 +26,7 @@ let export_to_system_as_ast : Systems.t -> Format.formatter ->
   | Lean       -> Lean.print_ast
   | Hollight   -> Hollight.print_ast
   | Pvs        -> Pvs.print_ast
+  | IsabelleHOL -> Isabelle_hol.print_ast
   | _ -> assert false
 
 (** [mk_ast md es] creates the STTfa ast of entries [es] from dedukti module
