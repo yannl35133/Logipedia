@@ -36,11 +36,12 @@ let rename__type src dst =
   in rename__type
 
 let rec rename_type src dst = function
+  | ForallK (ty_var, ty) when ty_var = src ->
+      ForallK (dst, rename_type src dst ty)
+  | ForallK (ty_var,  _) when ty_var = dst ->
+      raise VarNameAlreadyTaken
   | ForallK (ty_var, ty) ->
-      if ty_var = src then
-        raise VarNameAlreadyTaken
-      else
-        ForallK (ty_var, rename_type src dst ty)
+      ForallK (ty_var, rename_type src dst ty)
   | Ty _ty ->
       Ty (rename__type src dst _ty)
 
@@ -65,15 +66,51 @@ let rename__term src dst =
 
 
 let rec rename_term src dst = function
+  | ForallP (ty_var, tm) when ty_var = src ->
+      ForallP (dst, rename_term src dst tm)
+  | ForallP (ty_var,  _) when ty_var = dst ->
+      raise VarNameAlreadyTaken
   | ForallP (ty_var, tm) ->
-      if ty_var = src then
-        raise VarNameAlreadyTaken
-      else
-        ForallP (ty_var, rename_term src dst tm)
+      ForallP (ty_var, rename_term src dst tm)
   | Te _tm ->
       Te (rename__term src dst _tm)
 
+let rename_judgment src dst { ty; te; hyp; thm } =
+  {
+    ty = List.map (fun ty_var -> if ty_var = src then dst else if ty_var = dst then raise VarNameAlreadyTaken else ty_var) ty;
+    te = List.map (fun (tm_var, _ty) -> (tm_var, rename__type src dst _ty)) te;
+    hyp = TeSet.map (fun (prf_var, _tm) -> (prf_var, rename__term src dst _tm)) hyp;
+    thm = rename_term src dst thm
+  }
 
+let rename_proof src dst =
+  let rename__type = rename__type src dst in
+  let rename__term = rename__term src dst in
+  let rename_judgment = rename_judgment src dst in
+  let rec rename_proof = function
+    | Assume (j, prf_var) ->
+        Assume (rename_judgment j, prf_var)
+    | Lemma (name, j) ->
+        Lemma (name, rename_judgment j)
+    | Conv (j, prf, trace) ->
+        Conv (rename_judgment j, rename_proof prf, trace)
+    | ImplE (j, prfpq, prfp) ->
+        ImplE (rename_judgment j, rename_proof prfpq, rename_proof prfp)
+    | ImplI (j, prf, prf_var) ->
+        ImplI (rename_judgment j, rename_proof prf, prf_var)
+    | ForallE (j, prf, _te) ->
+        ForallE (rename_judgment j, rename_proof prf, rename__term _te)
+    | ForallI (j, prf, te_var) ->
+        ForallI (rename_judgment j, rename_proof prf, te_var)
+    | ForallPE (j, prf, _ty) ->
+        ForallPE (rename_judgment j, rename_proof prf, rename__type _ty)
+    | ForallPI (j, prf, ty_var) when ty_var = src ->
+        ForallPI (rename_judgment j, rename_proof prf, dst)
+    | ForallPI (_,   _, ty_var) when ty_var = dst ->
+        raise VarNameAlreadyTaken
+    | ForallPI (j, prf, ty_var) ->
+        ForallPI (rename_judgment j, rename_proof prf, ty_var)
+    in rename_proof
 
 let rename_type_variables item =
   let type_var_generator = generate_type_variables () in
@@ -97,6 +134,46 @@ let rename_type_variables item =
     end
   | Te _tm -> Te _tm, []
   in
+  (* let rec rename_type_variables_judgment ({ ty; _ } as j) =
+    match ty with
+    | [] -> j, []
+    | ty_var :: ty_tl -> begin
+      let dst = type_var_generator () in
+      let new_j = rename_judgment ty_var dst { j with ty = ty_tl } in
+      let renamed_j, renamings = rename_type_variables_judgment new_j in
+      { renamed_j with ty = dst :: renamed_j.ty }, (ty_var, dst) :: renamings
+    end
+  in *)
+  let rec rename_type_variables_proof = function
+    | Assume (j, prf_var) -> Assume (j, prf_var), []
+    | Lemma (name, j) -> Lemma (name, j), []
+    | Conv (j, prf, trace) ->
+        let renamed_prf, renamings = rename_type_variables_proof prf in
+        Conv (j, renamed_prf, trace), renamings
+    | ImplE (j, prfpq, prfp) ->
+        let renamed_prfpq, renamings1 = rename_type_variables_proof prfpq in
+        let renamed_prfp, renamings2 = rename_type_variables_proof prfp in
+        ImplE (j, renamed_prfpq, renamed_prfp), renamings1 @ renamings2
+    | ImplI (j, prf, prf_var) ->
+        let renamed_prf, renamings = rename_type_variables_proof prf in
+        ImplI (j, renamed_prf, prf_var), renamings
+    | ForallE (j, prf, _te) ->
+        let renamed_prf, renamings = rename_type_variables_proof prf in
+        ForallE (j, renamed_prf, _te), renamings
+    | ForallI (j, prf, te_var) ->
+        let renamed_prf, renamings = rename_type_variables_proof prf in
+        ForallI (j, renamed_prf, te_var), renamings
+    | ForallPE (j, prf, _ty) ->
+        let renamed_prf, renamings = rename_type_variables_proof prf in
+        ForallPE (j, renamed_prf, _ty), renamings
+    | ForallPI (j, prf, ty_var) -> begin try
+          let dst = type_var_generator () in
+          let new_prf = rename_proof ty_var dst prf in
+          let renamed_prf, renamings = rename_type_variables_proof new_prf in
+          ForallPI (j, renamed_prf, dst), (ty_var, dst) :: renamings
+        with VarNameAlreadyTaken -> rename_type_variables_proof (ForallPI (j, prf, ty_var))
+      end
+  in
   let rec rename_type_variables_both ty tm =
     try
       let renamed_ty, renamings = rename_type_variables_type ty in
@@ -104,6 +181,18 @@ let rename_type_variables item =
       renamed_ty, fst @@ rename_type_variables_term renamed_tm_once
     with
       VarNameAlreadyTaken -> rename_type_variables_both ty tm
+  in
+  let rec rename_type_variables_three ty tm prf =
+    try
+      let renamed_ty, renamings = rename_type_variables_type ty in
+      let renamed_tm_once = List.fold_left (fun tm (src, dst) -> rename_term src dst tm) tm renamings in
+      let renamed_prf_once = List.fold_left (fun tm (src, dst) -> rename_proof src dst tm) prf renamings in
+      let renamed_tm, renamings = rename_type_variables_term renamed_tm_once in
+      let renamed_prf_twice = List.fold_left (fun tm (src, dst) -> rename_proof src dst tm) renamed_prf_once renamings in
+      let renamed_prf, _ = rename_type_variables_proof renamed_prf_twice in
+      renamed_ty, renamed_tm, renamed_prf
+    with
+      VarNameAlreadyTaken -> rename_type_variables_three ty tm prf
   in
   match item with
   | Definition (name, ty, tm) ->
@@ -113,7 +202,7 @@ let rename_type_variables item =
       let tm, _ = rename_type_variables_term tm in
       Axiom (name, tm)
   | Theorem (name, tm, proof) ->
-      let tm, _ = rename_type_variables_term tm in
+      let _, tm, proof = rename_type_variables_three (Ty Prop) tm proof in
       Theorem (name, tm, proof)
   | Parameter (name, ty) ->
       let ty, _ = rename_type_variables_type ty in
@@ -122,6 +211,27 @@ let rename_type_variables item =
   | TypeDef (name, args, _ty) ->
       TypeDef (name, args, _ty)
 
+
+let type_of__term tm_ctxt =
+  let rec type_of__term = function
+  | TeVar var -> List.assoc var tm_ctxt
+  | Abs (_, _ty, _tm) | Forall (_, _ty, _tm) ->
+      Arrow (_ty, type_of__term _tm)
+  | App (_tm_left, _tm_right) | Impl (_tm_left, _tm_right) -> begin match type_of__term _tm_left with
+      | Arrow (_ty_left, _ty_right) when _ty_left = type_of__term _tm_right -> _ty_right
+      | _ -> assert false
+  end
+  | AbsTy (_, _tm) ->
+      type_of__term _tm
+  | Cst (_name, _tys) ->
+      assert false
+  in type_of__term
+
+let type_of_term tm_ctxt =
+  let rec type_of_term = function
+  | Te _te -> type_of__term tm_ctxt _te
+  | ForallP (_, te) -> type_of_term te
+  in type_of_term
 
 let cur_md = ref ""
 
@@ -182,7 +292,7 @@ let print_tm_var = Format.pp_print_string
 let print_typed_tm_var fmt (var, _ty) =
   Format.fprintf fmt "@[%a@ :: %a@]"
     print_tm_var var
-    print__type _ty
+    (* print__type _ty *) Format.pp_print_string "_"
 
 let rec print__term fmt = function
   | TeVar var ->
@@ -254,69 +364,80 @@ let rec print_term fmt = function
 
 let print_prf_var = Format.pp_print_string
 
-let print_judgment fmt { ty; te = tm; hyp; thm } =
-  let comma_sep = to_printer ",@ " in
-  Format.fprintf fmt "@[[To reach judgement %a%a%a@ |- %a]@]"
-    (print_list_if_non_empty ~pp_sep:comma_sep ~pp_end:comma_sep
-      (fun fmt ty_var ->
-        Format.fprintf fmt "%a :: Type"
-          print_ty_var ty_var)) ty
-    (print_list_if_non_empty ~pp_sep:comma_sep ~pp_end:comma_sep
-      (fun fmt (tm_var, _ty) ->
-        Format.fprintf fmt "%a :: %a"
-          print_tm_var tm_var
-          print__type _ty)) tm
-    (print_list_if_non_empty ~pp_sep:comma_sep ~pp_end:comma_sep
-      (fun fmt (prf_var, _tm) ->
-        Format.fprintf fmt "%a :: %a"
-          print_prf_var prf_var
-          print__term _tm)) (List.of_seq @@ TeSet.to_seq @@ hyp)
-    print_term thm
-
 let rec print_proof fmt = function
-  | Assume (j, prf_var) ->
-      Format.fprintf fmt "@[%a@ Assume %a@]@,"
-        print_judgment j
+  | Assume (_, prf_var) ->
+      Format.fprintf fmt "%a"
         print_prf_var prf_var
-  | Lemma (name, j) ->
-      Format.fprintf fmt "@[%a@ Apply lemma %a@]@,"
-        print_judgment j
+  | Lemma (name, _) ->
+      Format.fprintf fmt "%a"
         print_name name
-  | ForallE (j, proof, u) ->
-      Format.fprintf fmt "%a@[%a@ From above, apply forallE with term %a@]@,"
-        print_proof proof
-        print_judgment j
-        print__term u
-  | ForallI (j, proof, tm_var) ->
-      Format.fprintf fmt "%a@[%a@ From above, apply forallI with term_var %a@]@,"
-        print_proof proof
-        print_judgment j
-        print_tm_var tm_var
-  | ImplE (j, prfpq, prfp) ->
-      Format.fprintf fmt "%a@,@[<v2>Apply implE on implication proof@ %a@]@ @[<v2>with hypothesis proof@ %a@]@,"
-        print_judgment j
-        print_proof prfpq
-        print_proof prfp
-  | ImplI (j, proof, prf_var) ->
-      Format.fprintf fmt "%a@[%a@ From above, apply implI with hypothesis name %a@]@,"
-        print_proof proof
-        print_judgment j
-        print_prf_var prf_var
-  | ForallPE (j, proof, _ty) ->
-      Format.fprintf fmt "%a@[%a@ From above, apply forallPE with type %a@]@,"
-        print_proof proof
-        print_judgment j
+  | ForallE (_, proof, u) ->
+      let j = judgment_of proof in
+      let (tm_var, _ty, _tm_right) = j.thm |> function Te Forall (tm_var, _ty, _tm_right) -> (tm_var, _ty, _tm_right) | _ -> assert false in
+      Format.fprintf fmt "spec@ %a TYPE(%a)@ %a (%a)@ %a (%a)@ %a (Pure.PClass type_class %a TYPE(%a))@ %a (%a)"
+        print_as_1 "\\<cdot>"
         print__type _ty
-  | ForallPI (j, proof, ty_var) ->
-      Format.fprintf fmt "%a@[%a@ From above, apply forallPI with type_var %a@]@,"
+        print_as_1 "\\<cdot>"
+        print__term (Abs (tm_var, _ty, _tm_right))
+        print_as_1 "\\<cdot>"
+        print__term u
+        print_as_1 "\\<bullet>"
+        print_as_1 "\\<cdot>"
+        print__type _ty
+        print_as_1 "\\<bullet>"
         print_proof proof
-        print_judgment j
-        print_ty_var ty_var
-  | Conv (j, proof, trace) ->
-      Format.fprintf fmt "%a@[%a@ From above, apply conversion with trace %a@]@,"
+  | ForallI (_, proof, tm_var) ->
+      let j = judgment_of proof in
+      let tm__type = List.assoc tm_var j.te in
+      Format.fprintf fmt "allI@ %a TYPE(%a)@ %a (%a)@ %a (Pure.PClass type_class %a TYPE(%a))@ %a (%a%a.@ %a)"
+        print_as_1 "\\<cdot>"
+        print__type tm__type
+        print_as_1 "\\<cdot>"
+        print_term j.thm
+        print_as_1 "\\<bullet>"
+        print_as_1 "\\<cdot>"
+        print__type tm__type
+        print_as_1 "\\<bullet>"
+        print_as_1 "\\<^bold>\\<lambda>"
+        print_tm_var tm_var
         print_proof proof
-        print_judgment j
-        print_trace trace
+  | ImplE (_, prfpq, prfp) ->
+      let j = judgment_of prfpq in
+      let (_tm_left, _tm_right) = j.thm |> function Te Impl (_tm_left, _tm_right) -> (_tm_left, _tm_right) | _ -> assert false in
+      Format.fprintf fmt "mp@ %a (%a)@ %a (%a)@ %a (%a)@ %a (%a)"
+        print_as_1 "\\<cdot>"
+        print__term _tm_left
+        print_as_1 "\\<cdot>"
+        print__term _tm_right
+        print_as_1 "\\<bullet>"
+        print_proof prfpq
+        print_as_1 "\\<bullet>"
+        print_proof prfp
+  | ImplI (_, proof, prf_var) ->
+      let j = judgment_of proof in
+      let prf_prop = j.hyp |> TeSet.to_seq |> List.of_seq |> List.assoc prf_var in
+      Format.fprintf fmt "impI@ %a (%a)@ %a (%a)@ %a (Pure.AbsP@ (%a)@ (%a%a.@ %a))"
+        print_as_1 "\\<cdot>"
+        print__term prf_prop
+        print_as_1 "\\<cdot>"
+        print_term j.thm
+        print_as_1 "\\<bullet>"
+        print__term prf_prop
+        print_as_1 "\\<lambda>"
+        print_prf_var prf_var
+        print_proof proof
+  | ForallPE (_, proof, _ty) ->
+      Format.fprintf fmt "%a"
+        print_proof proof
+        (* print__type _ty *)
+  | ForallPI (_, proof, _ty_var) ->
+      Format.fprintf fmt "%a"
+        (* print_ty_var ty_var *)
+        print_proof proof
+  | Conv (_, proof, _trace) ->
+      Format.fprintf fmt "%a"
+        print_proof proof
+        (* print_trace trace *)
 
 let print_cartouched printer fmt el =
   Format.fprintf fmt "%a%a%a"
@@ -349,10 +470,10 @@ let print_item fmt =
         (sanitize id)
         (print_cartouched print_term) tm
   | Theorem ((_, id), tm, proof) ->
-      Format.fprintf fmt "@[theorem %s:@ %a@]@ @[<v2>proof@,%a@]@,qed"
+      Format.fprintf fmt "@[theorem_from_proof %s:@ %a@]@ @[<v2>: %a@]"
         (sanitize id)
         (print_cartouched print_term) tm
-        print_proof proof
+        (print_cartouched print_proof) proof
   | Parameter ((_, id), ty) ->
       Format.fprintf fmt "@[<2>consts %s@ :: %a@]"
         (sanitize id)
@@ -367,7 +488,7 @@ let print_ast : Format.formatter -> Ast.ast -> unit =
   fun fmt ast ->
     cur_md := ast.md;
     Format.set_margin 120;
-    Format.fprintf fmt "@[<v>theory %s@,@[<2>imports Main%a@]@,@[<v2>begin@,%a@]@,end@]@."
+    Format.fprintf fmt "@[<v2>theory %s@,@[<2>imports Main Theorem_from_proof%a@]@,keywords \"theorem_from_proof\" :: thy_decl@]@,@[<v2>begin@,%a@]@,end@."
       ast.md
       (fun fmt -> D.QSet.iter (Format.fprintf fmt " %s")) ast.dep
       Format.(pp_print_list print_item) (List.map rename_type_variables ast.items)
@@ -399,7 +520,7 @@ fun mk_thm ((name, prop), proof) (lthy: local_theory) =
 end;
 
 val () =
-  Outer_Syntax.local_theory \<^command_keyword>‹theorem_from_proof›
+  Outer_Syntax.local_theory @{command_keyword theorem_from_proof}
     "declare a prop and prove it using exact proof"
     (Parse.binding --| Parse.$$$ ":" -- Parse.prop --| Parse.$$$ ":" -- Parse.text
       >> mk_thm);
