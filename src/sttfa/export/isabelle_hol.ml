@@ -235,19 +235,23 @@ let type_of_term tm_ctxt =
 
 let cur_md = ref ""
 
+let forbidden_id = ["bool"]
+let valid_char c =
+  let i = Char.code c in
+  32 < i && i < 127 && not @@ List.mem c ['_']
+
 let sanitize id =
-  (* let u_id = String.uncapitalize_ascii id in
-  if List.mem id !forbidden_id || List.mem u_id !forbidden_id then
-    (*let () = Printf.printf "OOPS, issue with %s or %s, replacing by %s.\n" id u_id ("mat_"^id) in*)
-    "mat_"^id
-  else if b then u_id
-  else id *)
-  (* Format.eprintf "[WARNING] Id sanitization is not implemented@."; *)
-  id
+  let id =
+    if List.mem id forbidden_id || not @@ valid_char id.[0] then
+      "logi_" ^ id
+    else id
+  in
+  if not @@ valid_char id.[String.length id - 1] then
+    id ^ "_logi"
+  else id
 
 let print_name fmt (md, id) =
   let id = sanitize id in
-  let md = sanitize md in
   if !cur_md = md then
     Format.fprintf fmt "%s" id
   else
