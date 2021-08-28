@@ -510,23 +510,21 @@ begin
 
 ML ‹
 
-fun mk_thm ((name, prop), proof) (lthy: local_theory) =
+fun mk_thm ((name, prop), proof) (thy: theory) =
   let
-    val ctxt = lthy;
-    val thy = Proof_Context.theory_of lthy;
+    val ctxt = Proof_Context.init_global thy;
     val prop = Syntax.parse_prop ctxt prop;
     val prop = singleton (Syntax.check_props ctxt) prop;
-    val proof = Proof_Syntax.read_proof thy false true proof;
+    val proof = Proof_Syntax.read_proof thy false false proof;
     val proof = Proofterm.reconstruct_proof thy prop proof;
     val thm = Proof_Checker.thm_of_proof thy proof
   in
-  Local_Theory.note ((name, []), [thm]) lthy |> snd
-end;
-
+  Global_Theory.store_thm (name, thm) thy |> snd
+end
 val () =
-  Outer_Syntax.local_theory @{command_keyword theorem_from_proof}
+  Outer_Syntax.command \<^command_keyword>\<open>theorem_from_proof\<close>
     "declare a prop and prove it using exact proof"
     (Parse.binding --| Parse.$$$ ":" -- Parse.prop --| Parse.$$$ ":" -- Parse.text
-      >> mk_thm);
+      >> (Toplevel.theory o mk_thm));
 ›
 *)
